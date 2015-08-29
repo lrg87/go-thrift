@@ -11,76 +11,27 @@ import (
 )
 
 type Client struct {
-	Name           string
 	Transport      thrift.TTransport
 	InputProtocol  thrift.TProtocol
 	OutputProtocol thrift.TProtocol
 	SeqId          int32
-	Thrift         *parser.Thrift
-	NameTypeMap    map[string]thrift.TType
+	Service        *Service
 }
 
-var defultNameTypeMap = map[string]thrift.TType{
-	"stop":   thrift.STOP,
-	"void":   thrift.VOID,
-	"bool":   thrift.BOOL,
-	"byte":   thrift.BYTE,
-	"double": thrift.DOUBLE,
-	"i16":    thrift.I16,
-	"i32":    thrift.I32,
-	"i64":    thrift.I64,
-	"string": thrift.STRING,
-	"struct": thrift.STRUCT,
-	"map":    thrift.MAP,
-	"set":    thrift.SET,
-	"list":   thrift.LIST,
-	"utf8":   thrift.UTF8,
-	"utf16":  thrift.UTF16,
-}
-
-func NewClient(name string, hostPort string, timeout time.Duration, parsedThrift *parser.Thrift) (*Client, error) {
-	nameTypeMap := defultNameTypeMap
-	for name, _ := range parsedThrift.Enums {
-		nameTypeMap[name] = thrift.I32
-	}
-	for name, _ := range parsedThrift.Structs {
-		nameTypeMap[name] = thrift.STRUCT
-	}
-	for name, _ := range parsedThrift.Exceptions {
-		nameTypeMap[name] = thrift.STRUCT
-	}
-	for name, thriftType := range parsedThrift.Typedefs {
-		var ok bool
-		if nameTypeMap[name], ok = nameTypeMap[thriftType.Name]; !ok {
-			return nil, fmt.Errorf("type %s not found", thriftType.Name)
-		}
-	}
-
+func NewClient(hostPort string, timeout time.Duration, service *Service) (*Client, error) {
 	transport, err := thrift.NewTSocketTimeout(hostPort, timeout)
 	if err != nil {
 		return nil, err
 	}
-	if err = transport.Open(); err != nil {
-		return nil, err
-	}
-	factory := thrift.NewTBinaryProtocolFactoryDefault()
-	bufferFactory := thrift.NewTBufferedTransportFactory(8192)
+	binaryFactory := thrift.NewTBinaryProtocolFactoryDefault()
+	bufferedFactory := thrift.NewTBufferedTransportFactory(8192)
 	return &Client{
 		Transport:      transport,
-		InputProtocol:  factory.GetProtocol(bufferFactory.GetTransport(transport)),
-		OutputProtocol: factory.GetProtocol(bufferFactory.GetTransport(transport)),
+		InputProtocol:  binaryFactory.GetProtocol(bufferedFactory.GetTransport(transport)),
+		OutputProtocol: binaryFactory.GetProtocol(bufferedFactory.GetTransport(transport)),
 		SeqId:          0,
-		Thrift:         parsedThrift,
-		Name:           name,
-		NameTypeMap:    nameTypeMap,
+		Service:        service,
 	}, nil
-}
-
-func (client Client) lookupType(name string) thrift.TType {
-	if ttype, ok := client.NameTypeMap[name]; ok {
-		return ttype
-	}
-	return thrift.STOP
 }
 
 func (client Client) Call(method string, args ...interface{}) (response interface{}, err error) {
@@ -90,7 +41,26 @@ func (client Client) Call(method string, args ...interface{}) (response interfac
 	return client.recv()
 }
 
+func (client Client) Close() {
+	if transport := client.OutputProtocol.Transport(); transport.IsOpen() {
+		if err = transport.Close(); err != nil {
+			return err
+		}
+	}
+	if transport := client.InputProtocol.Transport(); transport.IsOpen() {
+		if err = transport.Close(); err != nil {
+			return err
+		}
+	}
+}
+
 func (client *Client) send(method string, args ...interface{}) (err error) {
+	if transport := client.OutputProtocol.Transport(); !transport.IsOpen() {
+		if err = transport.Open(); err != nil {
+			return err
+		}
+	}
+
 	client.SeqId++
 	if err = client.OutputProtocol.WriteMessageBegin(method, thrift.CALL, client.SeqId); err != nil {
 		return err
@@ -105,6 +75,12 @@ func (client *Client) send(method string, args ...interface{}) (err error) {
 }
 
 func (client *Client) recv() (response interface{}, err error) {
+	if transport := client.InputProtocol.Transport(); !transport.IsOpen() {
+		if err = transport.Open(); err != nil {
+			return nil, err
+		}
+	}
+
 	methodName, messageTypeId, seqId, err := client.InputProtocol.ReadMessageBegin()
 	if err != nil {
 		return nil, err
@@ -132,14 +108,10 @@ func (client *Client) recv() (response interface{}, err error) {
 }
 
 func (client Client) ReadResponse(methodName string) (response interface{}, err error) {
-	var service *parser.Service
 	var ok bool
-	if service, ok = client.Thrift.Services[client.Name]; !ok {
-		return nil, fmt.Errorf("service %s not exits.", client.Name)
-	}
 	var method *parser.Method
-	if method, ok = service.Methods[methodName]; !ok {
-		return nil, fmt.Errorf("method %s.%s not exits.", client.Name, methodName)
+	if method, ok = client.Service.Methods[methodName]; !ok {
+		return nil, fmt.Errorf("method %s.%s not exits.", client.Service.Name, methodName)
 	}
 
 	if _, err = client.InputProtocol.ReadStructBegin(); err != nil {
@@ -173,7 +145,7 @@ func (client Client) ReadResponse(methodName string) (response interface{}, err 
 }
 
 func (client Client) ReadValue(parserType *parser.Type) (response interface{}, err error) {
-	switch client.lookupType(parserType.Name) {
+	switch client.Service.LookupType(parserType.Name) {
 	case thrift.BOOL:
 		return client.InputProtocol.ReadBool()
 	case thrift.BYTE:
@@ -205,10 +177,8 @@ func (client Client) ReadValue(parserType *parser.Type) (response interface{}, e
 func (client Client) ReadStruct(parserType *parser.Type) (interface{}, error) {
 	var thriftStruct *parser.Struct
 	var ok bool
-	if thriftStruct, ok = client.Thrift.Structs[parserType.Name]; !ok {
-		if thriftStruct, ok = client.Thrift.Exceptions[parserType.Name]; !ok {
-			return nil, fmt.Errorf("struct %s not found.", parserType.Name)
-		}
+	if thriftStruct, ok = client.Service.Structs[parserType.Name]; !ok {
+		return nil, fmt.Errorf("struct %s not found.", parserType.Name)
 	}
 	result := make(map[string]interface{})
 	var err error
@@ -225,15 +195,24 @@ func (client Client) ReadStruct(parserType *parser.Type) (interface{}, error) {
 		if thriftType == thrift.STOP {
 			break
 		}
-		if int(index) > len(thriftStruct.Fields) {
-			return nil, fmt.Errorf("struct %s index %s not exists.", thriftStruct.Name, index)
+
+		var field *parser.Field
+		for _, structField := range thriftStruct.Fields {
+			if structField.ID == int(index) {
+				field = structField
+				break
+			}
 		}
-		field := thriftStruct.Fields[index-1]
-		var value interface{}
-		if value, err = client.ReadValue(field.Type); err != nil {
-			return nil, err
+
+		if field == nil {
+			client.InputProtocol.Skip(thriftType)
+		} else {
+			var value interface{}
+			if value, err = client.ReadValue(field.Type); err != nil {
+				return nil, err
+			}
+			result[field.Name] = value
 		}
-		result[field.Name] = value
 
 		if err = client.InputProtocol.ReadFieldEnd(); err != nil {
 			return nil, err
@@ -291,15 +270,11 @@ func (client Client) ReadList(parserType *parser.Type) (interface{}, error) {
 
 func (client Client) WriteRequest(methodName string, args ...interface{}) (err error) {
 	var ok bool
-	var service *parser.Service
-	if service, ok = client.Thrift.Services[client.Name]; !ok {
-		return fmt.Errorf("service %s not exits.", client.Name)
-	}
 	var method *parser.Method
-	if method, ok = service.Methods[methodName]; !ok {
-		return fmt.Errorf("method %s.%s not exits.", client.Name, methodName)
+	if method, ok = client.Service.Methods[methodName]; !ok {
+		return fmt.Errorf("method %s.%s not exits.", client.Service.Name, methodName)
 	}
-	if err = client.OutputProtocol.WriteStructBegin(service.Name + method.Name + "Args"); err != nil {
+	if err = client.OutputProtocol.WriteStructBegin(client.Service.Name + method.Name + "Args"); err != nil {
 		return err
 	}
 
@@ -327,10 +302,8 @@ func (client Client) WriteRequest(methodName string, args ...interface{}) (err e
 func (client Client) WriteStruct(parserType *parser.Type, value interface{}) (err error) {
 	var thriftStruct *parser.Struct
 	var ok bool
-	if thriftStruct, ok = client.Thrift.Structs[parserType.Name]; !ok {
-		if thriftStruct, ok = client.Thrift.Exceptions[parserType.Name]; !ok {
-			return fmt.Errorf("struct %s not found.", parserType.Name)
-		}
+	if thriftStruct, ok = client.Service.Structs[parserType.Name]; !ok {
+		return fmt.Errorf("struct %s not found.", parserType.Name)
 	}
 	var mapValue map[string]interface{}
 	if mapValue, ok = value.(map[string]interface{}); !ok {
@@ -367,7 +340,7 @@ func (client Client) WriteMap(parserType *parser.Type, value interface{}) (err e
 		return fmt.Errorf("%v type assertion to map[string]interface{} failed.", value)
 	}
 	valueType := parserType.ValueType
-	if err = client.OutputProtocol.WriteMapBegin(thrift.STRING, client.lookupType(valueType.Name), len(mapValue)); err != nil {
+	if err = client.OutputProtocol.WriteMapBegin(thrift.STRING, client.Service.LookupType(valueType.Name), len(mapValue)); err != nil {
 		return err
 	}
 	for k, v := range mapValue {
@@ -391,7 +364,7 @@ func (client Client) WriteList(parserType *parser.Type, value interface{}) (err 
 		return fmt.Errorf("%v type assertion to []interface{} failed.", value)
 	}
 	valueType := parserType.ValueType
-	if err = client.OutputProtocol.WriteListBegin(client.lookupType(valueType.Name), len(listValue)); err != nil {
+	if err = client.OutputProtocol.WriteListBegin(client.Service.LookupType(valueType.Name), len(listValue)); err != nil {
 		return err
 	}
 	for _, v := range listValue {
@@ -406,7 +379,7 @@ func (client Client) WriteList(parserType *parser.Type, value interface{}) (err 
 }
 
 func (client Client) WriteField(argument *parser.Field, arg interface{}) (err error) {
-	if err := client.OutputProtocol.WriteFieldBegin(argument.Name, client.lookupType(argument.Type.Name), int16(argument.ID)); err != nil {
+	if err := client.OutputProtocol.WriteFieldBegin(argument.Name, client.Service.LookupType(argument.Type.Name), int16(argument.ID)); err != nil {
 		return err
 	}
 	if err := client.WriteValue(argument.Type, arg); err != nil {
@@ -419,7 +392,7 @@ func (client Client) WriteField(argument *parser.Field, arg interface{}) (err er
 }
 
 func (client Client) WriteValue(parserType *parser.Type, value interface{}) (err error) {
-	switch client.lookupType(parserType.Name) {
+	switch client.Service.LookupType(parserType.Name) {
 	case thrift.BOOL:
 		if boolValue, ok := value.(bool); ok {
 			return client.OutputProtocol.WriteBool(boolValue)
