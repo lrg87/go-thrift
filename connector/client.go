@@ -41,7 +41,7 @@ func (client Client) Call(method string, args ...interface{}) (response interfac
 	return client.recv()
 }
 
-func (client Client) Close() {
+func (client Client) Close() (err error) {
 	if transport := client.OutputProtocol.Transport(); transport.IsOpen() {
 		if err = transport.Close(); err != nil {
 			return err
@@ -52,6 +52,7 @@ func (client Client) Close() {
 			return err
 		}
 	}
+	return nil
 }
 
 func (client *Client) send(method string, args ...interface{}) (err error) {
