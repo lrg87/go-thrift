@@ -5,17 +5,16 @@
 package parser
 
 import (
-	"bytes"
 	"encoding/json"
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 )
 
 func TestServiceParsing(t *testing.T) {
-	parser := &Parser{}
-	thrift, err := parser.Parse(bytes.NewBuffer([]byte(`
+	thrift, err := parse(`
 		include "other.thrift"
 
 		namespace go somepkg
@@ -67,7 +66,7 @@ func TestServiceParsing(t *testing.T) {
 		{
 			1: double dbl = 1.2,
 			2: optional string abc
-		}`)))
+		}`)
 
 	if err != nil {
 		t.Fatalf("Service parsing failed with error %s", err.Error())
@@ -263,8 +262,7 @@ func TestServiceParsing(t *testing.T) {
 }
 
 func TestParseTypeAnnotations(t *testing.T) {
-	parser := &Parser{}
-	thrift, err := parser.Parse(bytes.NewBuffer([]byte(`
+	thrift, err := parse(`
 typedef i64 (
 	ann1 = "a1",
 	ann2  =  "a2",
@@ -274,7 +272,7 @@ typedef i64 (
 typedef list<string> (a1 = "v1") listT (a2="v2")
 typedef map<string,i64> (a1 = "v1") mapT (a2="v2")
 typedef set<string> (a1 = "v1") setT (a2="v2")
-`)))
+`)
 	if err != nil {
 		t.Fatalf("Parse annotations failed: %v", err)
 	}
@@ -327,11 +325,10 @@ typedef set<string> (a1 = "v1") setT (a2="v2")
 }
 
 func TestParseConstant(t *testing.T) {
-	parser := &Parser{}
-	thrift, err := parser.Parse(bytes.NewBuffer([]byte(`
+	thrift, err := parse(`
 		const string C1 = "test"
 		const string C2 = C1
-		`)))
+		`)
 	if err != nil {
 		t.Fatalf("Service parsing failed with error %s", err.Error())
 	}
@@ -374,4 +371,10 @@ func pprint(v interface{}) string {
 		panic(err)
 	}
 	return string(b)
+}
+
+func parse(contents string) (*Thrift, error) {
+	parser := &Parser{}
+	thrift, err := parser.Parse(strings.NewReader(contents))
+	return thrift, err
 }
