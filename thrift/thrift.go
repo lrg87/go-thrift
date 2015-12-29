@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"sync"
 )
 
@@ -94,6 +95,15 @@ type UnsupportedValueError struct {
 
 func (e *UnsupportedValueError) Error() string {
 	return fmt.Sprintf("thrift: unsupported value (%+v): %s", e.Value, e.Str)
+}
+
+type InvalidValueError struct {
+	Value reflect.Value
+	Str   string
+}
+
+func (e *InvalidValueError) Error() string {
+	return fmt.Sprintf("thrift: invalid value (%+v): %s", e.Value, e.Str)
 }
 
 // ApplicationException is an application level thrift exception
@@ -191,8 +201,9 @@ type encodeField struct {
 }
 
 type structMeta struct {
-	required *BitSet // bitmap of required fields
-	fields   map[int]encodeField
+	required   *BitSet // bitmap of required fields
+	orderedIds []int
+	fields     map[int]encodeField
 }
 
 var (
@@ -224,7 +235,7 @@ func encodeFields(t reflect.Type) structMeta {
 	n := v.NumField()
 	for i := 0; i < n; i++ {
 		f := t.Field(i)
-		if f.PkgPath != "" {
+		if f.PkgPath != "" && !f.Anonymous {
 			continue
 		}
 		if f.Anonymous {
@@ -258,6 +269,13 @@ func encodeFields(t reflect.Type) structMeta {
 			fs[ef.id] = ef
 		}
 	}
+
+	m.orderedIds = make([]int, 0, len(m.fields))
+	for idx := range m.fields {
+		m.orderedIds = append(m.orderedIds, idx)
+	}
+	sort.Ints(m.orderedIds)
+
 	encodeFieldsCache[t] = m
 	return m
 }

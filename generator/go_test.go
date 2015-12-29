@@ -4,85 +4,59 @@
 
 package main
 
-// import (
-// 	"bytes"
-// 	"github.com/samuel/go-thrift/parser"
-// 	"io"
-// 	"regexp"
-// 	"testing"
-// )
+import (
+	"bytes"
+	"io/ioutil"
+	"os"
+	"path/filepath"
+	"testing"
 
-// // Regular expressions
-// const (
-// 	// http://golang.org/ref/spec#identifier
-// 	GO_IDENTIFIER = "[\\pL_][\\pL\\pN_]*"
-// )
+	"github.com/samuel/go-thrift/parser"
+)
 
-// // Thrift constants
-// const (
-// 	THRIFT_SIMPLE = `struct UserProfile {
-//   1: i32 uid,
-//   2: string name,
-//   3: string blurb
-// }`
-// )
+func TestSimple(t *testing.T) {
+	files, err := filepath.Glob("../testfiles/generator/*.thrift")
+	if err != nil {
+		t.Fatal(err)
+	}
 
-// func GenerateThrift(name string, in io.Reader) (out string, err error) {
-// 	var (
-// 		p  *parser.Parser
-// 		th *parser.Thrift
-// 		g  *GoGenerator
-// 		b  *bytes.Buffer
-// 	)
-// 	if th, err = p.Parse(in); err != nil {
-// 		return
-// 	}
-// 	g = &GoGenerator{ThriftFiles: th}
-// 	b = new(bytes.Buffer)
-// 	if err = g.Generate(name, b); err != nil {
-// 		return
-// 	}
-// 	out = b.String()
-// 	return
-// }
+	outPath, err := ioutil.TempDir("", "go-thrift-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(outPath)
 
-// func Includes(pattern string, in string) bool {
-// 	matched, err := regexp.MatchString(pattern, in)
-// 	return matched == true && err == nil
-// }
+	p := &parser.Parser{}
+	for _, fn := range files {
+		t.Logf("Testing %s", fn)
+		th, _, err := p.ParseFile(fn)
+		if err != nil {
+			t.Fatalf("Failed to parse %s: %s", fn, err)
+		}
+		generator := &GoGenerator{
+			ThriftFiles: th,
+			Format:      true,
+			Pointers:    true,
+		}
+		if err := generator.Generate(outPath); err != nil {
+			t.Fatalf("Failed to generate go for %s: %s", fn, err)
+		}
+		base := fn[:len(fn)-len(".thrift")]
+		name := filepath.Base(base)
+		compareFiles(t, outPath+"/gentest/"+name+".go", base+".go")
+	}
+}
 
-// // Generated package names should be valid identifiers.
-// // Per: http://golang.org/ref/spec#Package_clause
-// func TestGeneratesValidPackageNames(t *testing.T) {
-// 	var (
-// 		in     *bytes.Buffer
-// 		out    string
-// 		err    error
-// 		tests  map[string]string
-// 		is_err bool
-// 	)
-// 	in = bytes.NewBufferString(THRIFT_SIMPLE)
-// 	tests = map[string]string{
-// 		"foo-bar": "foo_bar",
-// 		"_foo":    "_foo",
-// 		"fooαβ":   "fooαβ",
-// 		"0foo":    "_0foo",
-// 	}
-// 	for test, expected := range tests {
-// 		if out, err = GenerateThrift(test, in); err != nil {
-// 			t.Fatalf("Could not generate Thrift: %v", err)
-// 		}
-// 		if !Includes("package "+GO_IDENTIFIER+"\n", out) {
-// 			t.Errorf("Couldn't find valid package for test %v", test)
-// 			is_err = true
-// 		}
-// 		if !Includes("package "+expected+"\n", out) {
-// 			t.Errorf("Couldn't find expected package '%v' for test %v", expected, test)
-// 			is_err = true
-// 		}
-// 		if is_err {
-// 			t.Logf("Problem with generated Thrift:\n%v\n", out)
-// 			is_err = false
-// 		}
-// 	}
-// }
+func compareFiles(t *testing.T, actualPath, expectedPath string) {
+	ac, err := ioutil.ReadFile(actualPath)
+	if err != nil {
+		t.Fatalf("Failed to read %s: %s", actualPath, err)
+	}
+	ex, err := ioutil.ReadFile(expectedPath)
+	if err != nil {
+		t.Fatalf("Failed to read %s: %s", expectedPath, err)
+	}
+	if !bytes.Equal(bytes.TrimSpace(ac), bytes.TrimSpace(ex)) {
+		t.Fatalf("Expected\n%s\ngot\n%s", string(ex), string(ac))
+	}
+}
