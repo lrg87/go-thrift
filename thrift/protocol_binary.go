@@ -17,7 +17,7 @@ const (
 )
 
 const (
-	maxMessageNameSize = 128
+	maxMessageNameSize = 512
 )
 
 type binaryProtocolWriter struct {
